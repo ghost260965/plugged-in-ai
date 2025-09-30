@@ -7,7 +7,7 @@ import plotly.express as px
 import streamlit as st
 from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import ImageSequenceClip
+import imageio
 import requests
 
 from predictor import train_models, predict_next_days, top_products_forecast
@@ -102,6 +102,11 @@ def generate_simple_video(image_url: str, lines: list[str], seconds: int = 6, si
     clip.write_videofile("out.mp4", codec="libx264", audio=False, verbose=False, logger=None)
     with open("out.mp4", "rb") as f:
         return f.read()
+
+def create_promo_gif(product_name, image_paths, output_path="promo.gif"):
+    frames = [Image.open(img).resize((400, 400)) for img in image_paths]
+    imageio.mimsave(output_path, frames, duration=1.5)  # 1.5s per frame
+    return output_path
 
 # -----------------------------
 # Forecast Section
