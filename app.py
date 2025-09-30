@@ -1,258 +1,192 @@
-# app.py — PluggedIn AI (Showcase Build)
-# Senior-level Streamlit dashboard with branding, caching, demo mode, and PDF export
-
-import os
-import io
-import hashlib
-from datetime import datetime
+# app.py — PluggedIn AI (CEO Demo Mode)
+# A polished Streamlit dashboard for forecasting, campaign plans, video teasers, and PDF export
+import os, io, math, tempfile, hashlib
+from datetime import datetime, timedelta
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 from fpdf import FPDF
+from PIL import Image, ImageDraw, ImageFont
+from moviepy.editor import ImageSequenceClip
+import requests
 
-# Local modules
-from predictor import train_model, predict_next_days, load_model
+from predictor import train_models, predict_next_days, top_products_forecast
 from agent import generate_marketing_plan, chat_with_ai
-from shopify_integration import fetch_products
 
 # -----------------------------
-# Page setup & global styling
+# Page setup & styling
 # -----------------------------
 st.set_page_config(page_title="PluggedIn AI — C4 Marketing", layout="wide")
 
-CUSTOM_CSS = """
+CSS = """
 <style>
-/* Brand palette */
-:root {
-  --brand:#e63946;
-  --ink:#0b0f14;
-  --muted:#6b7280;
-  --panel:#0f172a14;
-}
-
-html, body, [class*="css"]  { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
-h1,h2,h3 { letter-spacing:-0.02em; }
-.block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-.card {
-  border: 1px solid #0f172a22; border-radius: 14px; padding: 16px 18px; background: white;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-}
-.card h3 { margin-top: 0.2rem; }
-.small { color: var(--muted); font-size: 0.92rem; }
-.kpi { font-weight: 700; font-size: 1.1rem; }
-.footer { color:#94a3b8; text-align:center; margin-top: 14px; }
-hr { border: none; border-top: 1px solid #0f172a1a; margin: 18px 0 12px; }
-.brand { text-align:center; margin-bottom: 6px; }
-.brand .logo { font-size: 34px; font-weight: 800; color: var(--brand); letter-spacing: -0.03em; }
-.brand .tag { color: var(--muted); margin-top: -6px; }
-.stButton>button { border-radius: 10px; font-weight: 600; }
-.stDownloadButton>button { border-radius: 10px; font-weight: 600; }
+:root { --brand:#e63946; --ink:#0b0f14; --muted:#6b7280; }
+html, body, [class*="css"] { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+.block-container { padding-top: 1rem; padding-bottom: 2rem; }
+.card { border:1px solid #0f172a22; border-radius:14px; padding:16px 18px; background:white; box-shadow:0 1px 2px rgba(15,23,42,.04); }
+.brand { text-align:center; margin-bottom:8px; }
+.brand .logo { font-size:34px; font-weight:800; color:var(--brand); letter-spacing:-.03em; }
+.brand .tag { color:var(--muted); margin-top:-6px; }
+.footer { color:#94a3b8; text-align:center; margin-top: 16px; }
+.stButton>button, .stDownloadButton>button { border-radius:10px; font-weight:600; }
 </style>
 """
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-
+st.markdown(CSS, unsafe_allow_html=True)
 st.markdown(
-    "<div class='brand'><div class='logo'>⚡ PluggedIn AI</div>"
-    "<div class='tag'>Predict your next best-sellers. Launch AI-powered campaigns. Grow.</div></div>",
+    "<div class='brand'><div class='logo'>⚡ PluggedIn AI</div><div class='tag'>Predict best-sellers. Launch AI campaigns. Grow.</div></div>",
     unsafe_allow_html=True,
 )
 
 # -----------------------------
-# Helpers: caching & demo data
+# Demo product data (mock SKUs + images)
 # -----------------------------
-@st.cache_data(show_spinner=False)
-def _hash_df(df: pd.DataFrame) -> str:
-    b = io.BytesIO()
-    df.to_csv(b, index=False)
-    return hashlib.sha256(b.getvalue()).hexdigest()
+PRODUCTS = {
+    "JACKET-BLUE": {
+        "title": "Blue Snow Jacket",
+        "image_url": "https://picsum.photos/id/1011/400/400"
+    },
+    "GOGGLES-PRO": {
+        "title": "Pro Ski Goggles",
+        "image_url": "https://picsum.photos/id/1012/400/400"
+    },
+    "HELMET-LITE": {
+        "title": "Lite Snow Helmet",
+        "image_url": "https://picsum.photos/id/1013/400/400"
+    },
+}
 
 @st.cache_data(show_spinner=False)
-def load_demo_data() -> pd.DataFrame:
-    # 90-day demo with weekly seasonality + promotions
+def load_demo_df() -> pd.DataFrame:
     dates = pd.date_range(end=datetime.today().date(), periods=90, freq="D")
-    base = 60 + (dates.dayofweek * 2.5)
-    promo = (pd.Series(range(len(dates))) % 13 == 0).astype(int) * 25
-    noise = pd.Series(pd.Series(base).rolling(3, min_periods=1).mean()).shift(1).fillna(method="bfill")
-    sales = (base + promo + (noise * 0.2)).round().astype(int)
-    df = pd.DataFrame({"date": dates, "sales": sales, "is_promo": (promo > 0)})
-    return df
+    rows = []
+    for pid, bump in [("JACKET-BLUE", 0), ("GOGGLES-PRO", 12), ("HELMET-LITE", -8)]:
+        for i, d in enumerate(dates):
+            base = 40 + (d.dayofweek * 3) + bump
+            promo = 20 if i % 13 == 0 else 0
+            noise = 5 * math.sin(i/5)
+            sales = max(0, int(base + promo + noise))
+            rows.append({"date": d.date(), "product_id": pid, "sales": sales, "is_promo": promo>0})
+    return pd.DataFrame(rows)
 
-@st.cache_data(show_spinner=False)
-def train_cached(csv_bytes: bytes):
-    # Train once for a given dataset
-    tmp = io.BytesIO(csv_bytes)
-    info = train_model(tmp)
-    return info
-
-@st.cache_data(show_spinner=False)
-def forecast_cached(df: pd.DataFrame, n_days: int):
-    return predict_next_days(df.copy(), n_days=n_days)
-
-def require_openai_env() -> bool:
-    has = bool(os.getenv("OPENAI_API_KEY"))
-    if not has:
-        st.warning("OPENAI_API_KEY not set. Add it in Streamlit Secrets for the live app.", icon="⚠️")
-    return has
-
-# -----------------------------
-# Sidebar (inputs & data)
-# -----------------------------
-with st.sidebar:
-    st.subheader("📂 Data")
-    demo_mode = st.toggle("Use built-in demo data", value=True, help="Loads instantly with 90 days of sample sales.")
-    uploaded = st.file_uploader("Or upload sales CSV (date,sales[,is_promo])", type=["csv"], accept_multiple_files=False)
-
-    st.subheader("⚙️ Forecast Settings")
-    horizon = st.slider("Days ahead", 7, 30, 14)
-
-    st.subheader("🛒 Shopify (optional)")
-    if st.button("Fetch Shopify products"):
-        try:
-            prods = fetch_products()
-            if prods:
-                st.success("Fetched Shopify products.")
-                st.json(prods)
-            else:
-                st.info("No products or Shopify not configured.")
-        except Exception as e:
-            st.error(f"Shopify error: {e}")
-
-# Choose data source
-if demo_mode or uploaded is None:
-    df_sales = load_demo_data()
-else:
+def generate_simple_video(image_url: str, lines: list[str], seconds: int = 6, size=(720,720)) -> bytes:
+    # fetch image
     try:
-        df_sales = pd.read_csv(uploaded)
-    except Exception as e:
-        st.error(f"Failed to read CSV: {e}")
-        st.stop()
+        r = requests.get(image_url, timeout=10)
+        base_img = Image.open(io.BytesIO(r.content)).convert("RGB")
+    except Exception:
+        base_img = Image.new("RGB", size, color=(245,245,245))
+    base_img = base_img.resize(size)
 
-# -----------------------------
-# Layout: 3 panels
-# -----------------------------
-left, right = st.columns([2, 1])
-
-# ========= Left: Forecast & Report =========
-with left:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("### 📈 AI Demand Forecast")
-    st.caption("Upload your data or use demo data. Train once → predict fast with caching.")
-
-    st.dataframe(df_sales.head(), use_container_width=True)
-
-    # Train model (cached by dataset bytes)
     try:
-        dataset_key = _hash_df(df_sales)
-        if st.button("🔨 Train Model", help="Trains a lightweight RandomForest on the current dataset"):
-            with st.spinner("Training model…"):
-                info = train_cached(df_sales.to_csv(index=False).encode("utf-8"))
-                st.success(f"Model trained. MAE ≈ {info['mae']:.2f}")
-        model = load_model()
-    except Exception as e:
-        st.error(f"Training error: {e}")
-        model = None
+        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 40)
+        font_body  = ImageFont.truetype("DejaVuSans.ttf", 28)
+    except Exception:
+        font_title = ImageFont.load_default()
+        font_body  = ImageFont.load_default()
 
-    # Forecast
-    fut_df = None
-    if model:
-        if st.button("🔮 Predict"):
-            with st.spinner("Predicting future demand…"):
-                try:
-                    fut = forecast_cached(df_sales, horizon)
-                    fut_df = pd.DataFrame(fut)
-                    st.dataframe(fut_df, use_container_width=True)
-                    fig = px.line(fut_df, x="date", y="predicted_sales",
-                                  title="Predicted Sales (Next {} Days)".format(horizon))
-                    st.plotly_chart(fig, use_container_width=True)
+    frames = []
+    total_frames = seconds * 24
+    for t in range(total_frames):
+        frame = base_img.copy()
+        draw = ImageDraw.Draw(frame)
+        draw.rectangle([(0, size[1]-200), (size[0], size[1])], fill=(0,0,0,150))
+        y = size[1]-180
+        draw.text((30,y), lines[0][:30], fill=(230,57,70), font=font_title)
+        y += 60
+        for ln in lines[1:]:
+            draw.text((30,y), ln[:40], fill=(255,255,255), font=font_body)
+            y += 40
+        frames.append(frame)
 
-                    # "Top 3 pushes" — for per-SKU, expect a 'sku' column. Fallback: top forecast days.
-                    st.markdown("#### 🚀 Top Push Windows")
-                    top3 = fut_df.sort_values("predicted_sales", ascending=False).head(3)
-                    st.table(top3.reset_index(drop=True))
+    clip = ImageSequenceClip([f for f in frames], fps=24)
+    clip.write_videofile("out.mp4", codec="libx264", audio=False, verbose=False, logger=None)
+    with open("out.mp4", "rb") as f:
+        return f.read()
 
-                except Exception as e:
-                    st.error(f"Forecast error: {e}")
+# -----------------------------
+# Forecast Section
+# -----------------------------
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+st.markdown("### 📈 AI Demand Forecast")
+df = load_demo_df()
+st.dataframe(df.head(), use_container_width=True)
 
-    # PDF Export (text-only to avoid extra image deps)
-    if st.button("📥 Export Report as PDF", disabled=fut_df is None):
-        if fut_df is None:
-            st.warning("Run a prediction first.", icon="⚠️")
-        else:
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_font("Arial", size=14)
-            pdf.cell(0, 10, "PluggedIn AI — Forecast Report", ln=True, align="C")
-            pdf.set_font("Arial", size=11)
-            pdf.cell(0, 8, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True)
-            pdf.ln(4)
-            pdf.cell(0, 8, "Next {} Days — Predicted Sales:".format(horizon), ln=True)
-            pdf.ln(2)
-            for _, row in fut_df.iterrows():
-                pdf.cell(0, 7, f"{row['date']}: {row['predicted_sales']}", ln=True)
-            pdf.ln(6)
-            # Include quick summary
-            peak = fut_df.loc[fut_df['predicted_sales'].idxmax()]
-            pdf.multi_cell(0, 7, f"Summary: Peak demand expected on {peak['date']} "
-                                  f"with ~{int(round(peak['predicted_sales']))} units.")
-            # Stream to download
-            pdf_bytes = pdf.output(dest="S").encode("latin1")
-            st.download_button("Download PDF", data=pdf_bytes, file_name="PluggedIn_Forecast.pdf", mime="application/pdf")
-    st.markdown("</div>", unsafe_allow_html=True)
+if st.button("🔮 Predict & rank products"):
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+    df.to_csv(tmp.name, index=False)
+    top3 = top_products_forecast(tmp.name, n_days=14, top_k=3)
+    st.session_state["top3"] = top3
+    st.success("Computed Top 3 products!")
 
-    # ========= Middle: Campaign Launcher =========
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("### 🚀 Campaign Launcher")
-    st.caption("Generate a 7-day campaign plan with ad copy, visuals, CTA, and KPIs.")
+st.markdown("</div>", unsafe_allow_html=True)
 
-    colA, colB = st.columns(2)
-    with colA:
-        product_name = st.text_input("Product / Offer", "Blue Snowboard Jacket")
-    with colB:
-        audience = st.text_input("Audience", "18–30 snowboarders in Whistler")
+# -----------------------------
+# Campaign Launcher
+# -----------------------------
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+st.markdown("### 🚀 Campaign Launcher")
 
-    if st.button("🎯 Generate Campaign Plan"):
-        if not require_openai_env():
-            st.stop()
-        with st.spinner("Creating plan with the marketing model…"):
-            try:
-                plan = generate_marketing_plan(product_name, audience)
-                st.markdown("#### Plan")
+top3 = st.session_state.get("top3", [])
+if top3:
+    cols = st.columns(3)
+    for i, item in enumerate(top3):
+        with cols[i]:
+            pid = str(item["product_id"])
+            title = PRODUCTS[pid]["title"]
+            img = PRODUCTS[pid]["image_url"]
+            avg_pred = round(item["avg_predicted_sales"],1)
+            st.image(img, use_column_width=True)
+            st.markdown(f"**{title}**  \nSKU: `{pid}`  \nForecast: ~{avg_pred}/day")
+
+            if st.button(f"🎯 Plan {pid}"):
+                plan = generate_marketing_plan(title, "18–30 outdoor shoppers")
                 st.write(plan)
-            except Exception as e:
-                st.error(f"OpenAI error: {e}")
-    st.markdown("</div>", unsafe_allow_html=True)
+                st.session_state[f"plan_{pid}"] = plan
 
-# ========= Right: Advisor / Chat =========
-with right:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("### 💬 PluggedIn Advisor")
-    st.caption("Ask business questions. Answers are tuned for small-business operators.")
+            if st.button(f"🎬 Video {pid}"):
+                lines = [title, "Limited Drop", "Tap to Shop"]
+                mp4 = generate_simple_video(img, lines)
+                st.download_button("Download MP4", mp4, file_name=f"{pid}_promo.mp4", mime="video/mp4")
+else:
+    st.info("Click Predict & rank products first.")
 
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-
-    query = st.text_area("Ask PluggedIn AI…", height=120, placeholder="e.g., How do I price this jacket at 60% margin?")
-    if st.button("Send"):
-        if not require_openai_env():
-            st.stop()
-        if query.strip():
-            with st.spinner("Thinking…"):
-                try:
-                    reply = chat_with_ai(query)
-                    st.session_state.chat_history.append(("You", query))
-                    st.session_state.chat_history.append(("AI", reply))
-                except Exception as e:
-                    st.error(f"OpenAI error: {e}")
-
-    # show chat history (latest first)
-    for role, msg in st.session_state.chat_history[::-1]:
-        if role == "You":
-            st.markdown(f"**You:** {msg}")
-        else:
-            st.markdown(f"**Assistant:** {msg}")
-    st.markdown("</div>", unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
 
 # -----------------------------
-# Footer
+# Advisor + Report
 # -----------------------------
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+st.markdown("### 💬 PluggedIn Advisor & PDF Report")
+
+q = st.text_input("Ask a business question")
+if st.button("Send"):
+    if q.strip():
+        a = chat_with_ai(q)
+        st.session_state.setdefault("chat", []).append(("You",q))
+        st.session_state["chat"].append(("AI",a))
+
+if "chat" in st.session_state:
+    for role,text in st.session_state["chat"][::-1]:
+        st.markdown(f"**{role}:** {text}")
+
+if st.button("📥 Export PDF"):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=14)
+    pdf.cell(0,10,"PluggedIn AI — Report", ln=True, align="C")
+    pdf.set_font("Arial", size=11)
+    pdf.cell(0,8,f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True)
+    pdf.ln(6)
+    if top3:
+        pdf.cell(0,8,"Top Products:", ln=True)
+        for item in top3:
+            pid = str(item["product_id"])
+            title = PRODUCTS[pid]["title"]
+            avg = round(item["avg_predicted_sales"],1)
+            pdf.cell(0,7, f"{title} — ~{avg}/day", ln=True)
+    pdf_bytes = pdf.output(dest="S").encode("latin1")
+    st.download_button("Download PDF", pdf_bytes, "PluggedIn_Summary.pdf", "application/pdf")
+
+st.markdown("</div>", unsafe_allow_html=True)
+
 st.markdown("<div class='footer'>PluggedIn AI © 2025 • Built by C4 Marketing</div>", unsafe_allow_html=True)
