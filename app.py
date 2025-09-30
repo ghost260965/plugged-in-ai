@@ -9,6 +9,8 @@ import plotly.express as px
 import imageio
 from PIL import Image
 from fpdf import FPDF
+import requests
+from io import BytesIO
 
 # Load secrets
 load_dotenv()
@@ -16,14 +18,39 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # -------- DEMO PRODUCTS --------
 demo_products = [
-    {"id": "SKU1", "name": "Snowboard Jacket", "images": ["demo1.png", "demo2.png"]},
-    {"id": "SKU2", "name": "Winter Boots", "images": ["demo3.png", "demo4.png"]},
-    {"id": "SKU3", "name": "Thermal Gloves", "images": ["demo5.png", "demo6.png"]},
+    {
+        "id": "SKU1",
+        "name": "Snowboard Jacket",
+        "images": [
+            "https://via.placeholder.com/400x400.png?text=Jacket1",
+            "https://via.placeholder.com/400x400.png?text=Jacket2",
+        ],
+    },
+    {
+        "id": "SKU2",
+        "name": "Winter Boots",
+        "images": [
+            "https://via.placeholder.com/400x400.png?text=Boots1",
+            "https://via.placeholder.com/400x400.png?text=Boots2",
+        ],
+    },
+    {
+        "id": "SKU3",
+        "name": "Thermal Gloves",
+        "images": [
+            "https://via.placeholder.com/400x400.png?text=Gloves1",
+            "https://via.placeholder.com/400x400.png?text=Gloves2",
+        ],
+    },
 ]
 
 # -------- GIF GENERATOR --------
 def create_promo_gif(product_name, image_paths, output_path="promo.gif"):
-    frames = [Image.open(img).resize((400, 400)) for img in image_paths]
+    frames = []
+    for url in image_paths:
+        response = requests.get(url)
+        img = Image.open(BytesIO(response.content)).resize((400, 400))
+        frames.append(img)
     imageio.mimsave(output_path, frames, duration=1.5)
     return output_path
 
